@@ -1,137 +1,157 @@
 import asyncio
 import random
 import re
-from datetime import timedelta
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.enums import ParseMode
 from aiogram.filters import CommandStart, Command
-from aiogram.client.default import DefaultBotProperties
-
 from aiogram.types import (
     Message,
     ReplyKeyboardMarkup,
     KeyboardButton,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
-    CallbackQuery
+    CallbackQuery,
 )
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 from config import TOKEN, ADMIN
 from database import (
     has_premium,
-    get_premium_date,
-    give_premium,
     check_limit,
     add_request,
-    remaining_requests
+    remaining_requests,
+    give_premium,
+    get_premium_date,
 )
-
 from rarity import rarity
+
+# ---------------- BOT ----------------
 
 bot = Bot(
     token=TOKEN,
-    default=DefaultBotProperties(
-        parse_mode=ParseMode.HTML
-    )
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
 )
 
 dp = Dispatcher()
 
-# ---------------- КНОПКИ ----------------
+# ---------------- KEYBOARDS ----------------
 
 main_kb = ReplyKeyboardMarkup(
     keyboard=[
-        [
-            KeyboardButton(text="ПОИСК"),
-            KeyboardButton(text="ПРОФИЛЬ")
-        ],
-        [
-            KeyboardButton(text="ПОДПИСКА")
-        ]
+        [KeyboardButton(text="ПОИСК"), KeyboardButton(text="ПРОФИЛЬ")],
+        [KeyboardButton(text="ПОДПИСКА")]
     ],
     resize_keyboard=True
 )
 
 search_kb = InlineKeyboardMarkup(
     inline_keyboard=[
-        [
-            InlineKeyboardButton(
-                text="5 символов 🔒",
-                callback_data="find_5"
-            )
-        ],
-        [
-            InlineKeyboardButton(
-                text="6 символов 🆓",
-                callback_data="find_6"
-            )
-        ]
+        [InlineKeyboardButton(text="5 символов 🔒", callback_data="find_5")],
+        [InlineKeyboardButton(text="6 символов 🆓", callback_data="find_6")]
     ]
 )
 
-def chars_kb(length):
+def type_kb(length):
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="С цифрами", callback_data=f"num_{length}")],
+            [InlineKeyboardButton(text="Без цифр", callback_data=f"nonum_{length}")]
+        ]
+    )
+
+def result_kb(length, nums):
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(
-                    text="С цифрами",
-                    callback_data=f"num_{length}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Без цифр",
-                    callback_data=f"nonum_{length}"
-                )
+                InlineKeyboardButton(text="✅ Оставить", callback_data="keep"),
+                InlineKeyboardButton(text="🔄 Скип", callback_data=f"skip_{length}_{int(nums)}")
             ]
         ]
     )
 
-def result_kb(length, numbers):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="✅ Оставить",
-                    callback_data="keep"
-                ),
+# ---------------- GENERATOR ----------------
 
-                InlineKeyboardButton(
-                    text="🔄 Скип",
-                    callback_data=f"skip_{length}_{int(numbers)}"
-                )
-            ]
-        ]
-    )
-
-# ---------------- ЛОГИКА ----------------
-
-def generate_username(length, numbers=False):
-    letters = "abcdefghijklmnopqrstuvwxyz"
-
-    if numbers:
-        letters += "0123456789"
-
-    return "".join(
-        random.choice(letters)
-        for _ in range(length)
-    )
+def gen_username(length, nums=False):
+    chars = "abcdefghijklmnopqrstuvwxyz"
+    if nums:
+        chars += "0123456789"
+    return "".join(random.choice(chars) for _ in range(length))
 
 def check_username(username):
-    # фейковая проверка
     return random.choice([True, False])
 
-async def send_result(message, length, numbers):
+# ---------------- START ----------------
+
+@dp.message(CommandStart())
+async def start(message: Message):
+    user = message.from_user.username or "user"
+
+    await message.answer(
+        f"Привет, <b>{user}</b>.\n"
+        "├ В данном боте можно найти\n"
+        "├ Красивый свободный username",
+        reply_markup=main_kb
+    )
+
+# ---------------- MENU ----------------
+
+@dp.message(F.text == "ПОИСК")
+async def search(message: Message):
+    user = message.from_user.username or str(message.from_user.id)
+
+    if user != ADMIN and not has_premium(user):
+        if not check_limit(user):
+            await message.answer("❌ Лимит 10 запросов / 48 часов исчерпан")
+            return
+        add_request(user)
+
+    await message.answer("Выбери длину:", reply_markup=search_kb)
+
+@dp.message(F.text == "ПРОФИЛЬ")
+async def profile(message: Message):
+    user = message.from_user.username or str(message.from_user.id)
+
+    await message.answer(
+        f"👤 Профиль\n\n"
+        f"├ Подписка: {'Да' if has_premium(user) else 'Нет'}\n"
+        f"├ До: {get_premium_date(user)}\n"
+        f"└ Осталось запросов: {remaining_requests(user)}/10"
+    )
+
+@dp.message(F.text == "ПОДПИСКА")
+async def sub(message: Message):
+    await message.answer(
+        f"⭐ Подписка 50 Stars / месяц\n"
+        f"Писать: @{ADMIN}"
+    )
+
+# ---------------- SEARCH FLOW ----------------
+
+@dp.callback_query(F.data.startswith("find_"))
+async def find(call: CallbackQuery):
+    length = int(call.data.split("_")[1])
+    user = call.from_user.username or str(call.from_user.id)
+
+    if length == 5 and user != ADMIN and not has_premium(user):
+        await call.message.answer("🔒 5 символов только с подпиской")
+        return
+
+    await call.message.answer("Тип поиска:", reply_markup=type_kb(length))
+
+@dp.callback_query(F.data.startswith("num_") | F.data.startswith("nonum_"))
+async def generate(call: CallbackQuery):
+    parts = call.data.split("_")
+    nums = parts[0] == "num"
+    length = int(parts[1])
+
+    await send_result(call.message, length, nums)
+
+async def send_result(message, length, nums):
     while True:
-        username = generate_username(length, numbers)
+        username = gen_username(length, nums)
 
-        valid = re.match(
-            r"^[a-zA-Z][a-zA-Z0-9_]{4,31}$",
-            username
-        )
-
-        if not valid:
+        if not re.match(r"^[a-zA-Z][a-zA-Z0-9_]{2,31}$", username):
             continue
 
         free = check_username(username)
@@ -140,237 +160,36 @@ async def send_result(message, length, numbers):
             "✅ <b>Найдено!</b>\n\n"
             f"├ Username: <code>{username}</code>\n"
             f"├ Редкость:\n{rarity(username)}\n"
-            f"└ Статус: "
-            f"{'Свободен ✅' if free else 'Занят ❌'}\n\n"
-            "          @StarsSearchBot"
+            f"└ Статус: {'Свободен' if free else 'Занят'}"
         )
 
-        await message.answer(
-            text,
-            reply_markup=result_kb(
-                length,
-                numbers
-            )
-        )
-
+        await message.answer(text, reply_markup=result_kb(length, nums))
         break
 
-# ---------------- START ----------------
-
-@dp.message(CommandStart())
-async def start(message: Message):
-    username = message.from_user.username or "user"
-
-    text = (
-        f"Привет, <b>{username}</b>.\n"
-        "├ В данном боте можно найти\n"
-        "├ Красивый свободный username"
-    )
-
-    await message.answer(
-        text,
-        reply_markup=main_kb
-    )
-
-# ---------------- ПОИСК ----------------
-
-@dp.message(F.text == "ПОИСК")
-async def search(message: Message):
-    username = (
-        message.from_user.username
-        or str(message.from_user.id)
-    )
-
-    if (
-        username != ADMIN
-        and not has_premium(username)
-    ):
-
-        left = remaining_requests(username)
-
-        if left <= 0:
-            await message.answer(
-                "❌ Лимит исчерпан.\n"
-                "├ 10 запросов / 48 часов\n"
-                f"└ Для безлимита: @{ADMIN}"
-            )
-            return
-
-        await message.answer(
-            f"🆓 Осталось запросов: {left}/10"
-        )
-
-    await message.answer(
-        "Выбери длину username:",
-        reply_markup=search_kb
-    )
-
-@dp.callback_query(F.data.startswith("find_"))
-async def choose_type(call: CallbackQuery):
-    length = call.data.split("_")[1]
-
-    username = (
-        call.from_user.username
-        or str(call.from_user.id)
-    )
-
-    if (
-        length == "5"
-        and username != ADMIN
-        and not has_premium(username)
-    ):
-
-        await call.message.answer(
-            "🔒 5 символов только по подписке.\n"
-            f"Покупка: @{ADMIN}"
-        )
-
-        return
-
-    await call.message.answer(
-        "Выбери тип поиска:",
-        reply_markup=chars_kb(length)
-    )
-
-@dp.callback_query(
-    F.data.startswith("num_")
-)
-
-@dp.callback_query(
-    F.data.startswith("nonum_")
-)
-
-async def find_username(call: CallbackQuery):
-    data = call.data.split("_")
-
-    numbers = data[0] == "num"
-    length = int(data[1])
-
-    username = (
-        call.from_user.username
-        or str(call.from_user.id)
-    )
-
-    if (
-        username != ADMIN
-        and not has_premium(username)
-    ):
-
-        if not check_limit(username):
-            await call.message.answer(
-                "❌ Лимит запросов исчерпан.\n"
-                "├ 10 запросов / 48 часов\n"
-                f"└ Для безлимита: @{ADMIN}"
-            )
-
-            return
-
-        add_request(username)
-
-    await call.message.answer(
-        "🔍 Поиск username..."
-    )
-
-    await send_result(
-        call.message,
-        length,
-        numbers
-    )
-
-# ---------------- СКИП ----------------
-
-@dp.callback_query(
-    F.data.startswith("skip_")
-)
-
-async def skip_username(call: CallbackQuery):
-    data = call.data.split("_")
-
-    length = int(data[1])
-    numbers = bool(int(data[2]))
-
-    await send_result(
-        call.message,
-        length,
-        numbers
-    )
+# ---------------- SKIP / KEEP ----------------
 
 @dp.callback_query(F.data == "keep")
-async def keep_username(call: CallbackQuery):
-    await call.message.answer(
-        "🎉 Поздравляем с обновкой!"
-    )
+async def keep(call: CallbackQuery):
+    await call.message.answer("🎉 Поздравляем с обновкой!")
 
-# ---------------- ПРОФИЛЬ ----------------
+@dp.callback_query(F.data.startswith("skip_"))
+async def skip(call: CallbackQuery):
+    _, length, nums = call.data.split("_")
+    await send_result(call.message, int(length), bool(int(nums)))
 
-@dp.message(F.text == "ПРОФИЛЬ")
-async def profile(message: Message):
-    username = (
-        message.from_user.username
-        or str(message.from_user.id)
-    )
-
-    premium = (
-        "Есть ✅"
-        if has_premium(username)
-        else "Нет ❌"
-    )
-
-    left = remaining_requests(username)
-
-    text = (
-        "👤 <b>Профиль</b>\n\n"
-        f"├ Подписка: {premium}\n"
-        f"├ Действует до: "
-        f"{get_premium_date(username)}\n"
-        f"└ Осталось запросов: "
-        f"{left}/10"
-    )
-
-    await message.answer(text)
-
-# ---------------- ПОДПИСКА ----------------
-
-@dp.message(F.text == "ПОДПИСКА")
-async def sub(message: Message):
-    text = (
-        "⭐ Подписка стоит 50 Stars / месяц.\n\n"
-        f"Для покупки отправь Stars @{ADMIN}"
-    )
-
-    await message.answer(text)
-
-# ---------------- АДМИН ----------------
+# ---------------- ADMIN ----------------
 
 @dp.message(Command("premiumgive"))
-async def premium_give(message: Message):
-
-    if (
-        message.from_user.username
-        != ADMIN
-    ):
+async def premium(message: Message):
+    if message.from_user.username != ADMIN:
         return
 
-    args = message.text.split()
+    _, user, days = message.text.split()
+    give_premium(user.replace("@", ""), int(days))
 
-    if len(args) != 3:
-        await message.answer(
-            "/premiumgive username days"
-        )
+    await message.answer("✅ Выдано")
 
-        return
-
-    username = args[1].replace("@", "")
-    days = int(args[2])
-
-    give_premium(username, days)
-
-    await message.answer(
-        f"✅ @{username} получил "
-        f"Premium на {days} дней"
-    )
-
-# ---------------- ЗАПУСК ----------------
+# ---------------- RUN ----------------
 
 async def main():
     print("Bot started")
